@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spine 动画查看器</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <aside>
+    <div class="brand">Spine 动画查看器</div>
+    <div class="tools">
+      <button id="open" type="button">打开文件夹</button>
+      <button id="refresh" type="button">刷新</button>
+    </div>
+    <input id="filter" type="search" placeholder="筛选文件名、skel、json">
+    <div id="folder" class="folder">尚未选择文件夹</div>
+    <div id="count" class="count"></div>
+    <div id="list" class="list"></div>
+    <div class="foot">同目录的 .skel / .json 配 .atlas 即可播放</div>
+  </aside>
+  <main>
+    <div class="controls">
+      <button id="pause" type="button" class="btn pause" disabled>暂停</button>
+      <button id="loop" type="button" class="btn loop" disabled>循环播放</button>
+      <label id="skinWrap" class="skin-wrap" hidden>皮肤
+        <select id="skin"></select>
+      </label>
+      <label class="check"><input id="pma" type="checkbox" disabled> 预乘 Alpha</label>
+      <span id="now" class="now"></span>
+    </div>
+    <div id="anims" class="anims"></div>
+    <div class="stage">
+      <iframe id="frame" title="Spine 画面"></iframe>
+      <div id="overlay" class="overlay">打开一个文件夹，或把文件夹拖到 SpineViewer.exe 上。
+文件夹里可以同时放 .skel 和 .json，每个动画再配上同名 .atlas 和图片。</div>
+      <div id="viewHint" class="view-hint hidden">滚轮缩放 · 拖动平移 · 双击适应</div>
+      <div class="view-tools">
+        <button id="zoomOut" type="button" title="缩小" disabled>−</button>
+        <button id="zoomReset" type="button" title="适应画面" disabled>100%</button>
+        <button id="zoomIn" type="button" title="放大" disabled>+</button>
+      </div>
+    </div>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

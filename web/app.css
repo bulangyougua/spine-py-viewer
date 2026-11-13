@@ -1,0 +1,224 @@
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #121418;
+  color: #e8edf5;
+  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+
+body { display: flex; min-width: 960px; }
+
+aside {
+  width: 320px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: #181c23;
+  border-right: 1px solid #2c3340;
+}
+
+.brand {
+  padding: 14px 12px 8px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.tools {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px 8px;
+}
+
+.tools button, #filter {
+  border: 0;
+  border-radius: 4px;
+  background: #2a3344;
+  color: #fff;
+  height: 34px;
+}
+
+#open { flex: 1; background: #2f5f93; font-weight: 700; cursor: pointer; }
+#refresh { width: 64px; cursor: pointer; }
+#filter { margin: 0 12px 8px; padding: 0 10px; }
+
+.folder, .count, .foot {
+  padding: 0 12px 8px;
+  color: #9aa3b2;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.list { flex: 1; overflow: auto; }
+
+.file {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  background: transparent;
+  color: inherit;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.file:hover { background: rgba(255, 255, 255, 0.05); }
+.file.on { background: rgba(46, 78, 128, 0.72); }
+.file-name { display: block; font-weight: 700; }
+.file-meta { display: block; margin-top: 2px; color: #9aa3b2; font-size: 12px; }
+.file.on .file-meta { color: #d5e4f7; }
+.empty { padding: 16px 12px; color: #9aa3b2; line-height: 1.5; }
+.foot { margin-top: auto; padding-top: 8px; padding-bottom: 12px; }
+
+main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.btn {
+  height: 40px;
+  min-width: 96px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 4px;
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn:active:not(:disabled) { transform: scale(0.96); }
+.btn.pause { background: rgb(176, 64, 64); }
+.btn.loop { background: rgb(36, 140, 78); }
+.btn.loop.on { outline: 2px solid #b6ffcf; }
+.btn.anim {
+  background: rgb(46, 78, 128);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.btn.anim.on { outline: 2px solid #9ec0ff; background: rgb(62, 104, 170); }
+
+.skin-wrap, .check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.skin-wrap[hidden] { display: none; }
+
+.skin-wrap select {
+  max-width: 160px;
+  height: 32px;
+  border: 0;
+  border-radius: 4px;
+  background: #2a3344;
+  color: #fff;
+}
+
+.now {
+  margin-left: auto;
+  color: #d5dbe6;
+  font-size: 13px;
+}
+
+.anims {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px;
+  max-height: 28vh;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.anims:empty { display: none; }
+
+.stage {
+  position: relative;
+  flex: 1;
+  min-height: 240px;
+  background:
+    linear-gradient(45deg, #2a3140 25%, transparent 25%),
+    linear-gradient(-45deg, #2a3140 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #2a3140 75%),
+    linear-gradient(-45deg, transparent 75%, #2a3140 75%);
+  background-color: #1c2430;
+  background-size: 28px 28px;
+  background-position: 0 0, 0 14px, 14px -14px, -14px 0;
+}
+
+iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  text-align: center;
+  white-space: pre-line;
+  line-height: 1.6;
+  background: rgba(12, 16, 22, 0.42);
+}
+
+.overlay.hidden { display: none; }
+
+.view-hint {
+  position: absolute;
+  left: 12px;
+  bottom: 14px;
+  z-index: 2;
+  color: rgba(232, 237, 245, 0.78);
+  font-size: 12px;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+}
+
+.view-hint.hidden { display: none; }
+
+.view-tools {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 2;
+  display: flex;
+  gap: 6px;
+}
+
+.view-tools button {
+  height: 34px;
+  min-width: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(16, 20, 28, 0.86);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.view-tools button:disabled { opacity: 0.4; cursor: default; }
+#zoomReset { min-width: 68px; font-size: 13px; }
