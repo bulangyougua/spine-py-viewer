@@ -5,6 +5,9 @@ Open a folder, pick one skeleton, then pause, play that clip, or cycle every cli
 
 from __future__ import annotations
 
+import base64
+import ctypes
+import hashlib
 import json
 import os
 import queue
@@ -15,12 +18,14 @@ import sys
 import tempfile
 import threading
 import time
-import tkinter as tk
 import webbrowser
+from ctypes import wintypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from tkinter import filedialog, messagebox
 from urllib.parse import quote, unquote, urlparse
+
+CREATE_NO_WINDOW = 0x08000000
+WINDOW_TITLE = "Spine 动画查看器"
 
 SKIP_DIRS = {
     ".git",
@@ -106,14 +111,19 @@ def load_settings() -> dict:
         return {}
 
 
-def save_settings(folder: Path) -> None:
+def save_settings(folders: list[Path]) -> None:
     try:
         settings_file().write_text(
-            json.dumps({"folder": str(folder)}, ensure_ascii=False, indent=2),
+            json.dumps({"folders": [str(folder) for folder in folders]}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except OSError:
         pass
+
+
+def source_id(folder: Path) -> str:
+    key = os.path.normcase(str(folder.resolve())).encode("utf-8")
+    return hashlib.sha256(key).hexdigest()[:16]
 
 
 def available_runtimes(vendor: Path) -> list[str]:
@@ -179,7 +189,8 @@ def atlas_uses_pma(path: Path | None) -> bool:
 
 def asset_url(folder: Path, path: Path) -> str:
     rel = path.resolve().relative_to(folder.resolve()).as_posix()
-    return "/assets/" + "/".join(quote(part) for part in rel.split("/"))
+    encoded = "/".join(quote(part) for part in rel.split("/"))
+    return f"/assets/{source_id(folder)}/{encoded}"
 
 
 def scan_folder(folder: Path, available: set[str]) -> tuple[list[dict], str]:
@@ -204,12 +215,13 @@ def scan_folder(folder: Path, available: set[str]) -> tuple[list[dict], str]:
             else:
                 skeletons.append((root_path, stem, key, kind, path))
             if len(skeletons) >= 8000:
-                warning = "文件太多，只列出了前 8000 个骨骼，请换一个更小的文件夹。"
+                warning = f"{folder.name} 文件太多，只列出了前 8000 个骨骼。"
                 break
         if warning:
             break
 
     assets = []
+    source = source_id(folder)
     for _root, stem, key, kind, path in skeletons:
         version = read_version(path, kind)
         if kind == "json" and not version:
@@ -221,10 +233,11 @@ def scan_folder(folder: Path, available: set[str]) -> tuple[list[dict], str]:
         parent = Path(rel).parent.as_posix()
         assets.append(
             {
-                "id": rel,
+                "id": f"{source}:{rel}",
                 "name": stem,
                 "rel": rel,
                 "dir": "" if parent == "." else parent,
+                "source": source,
                 "kind": kind,
                 "version": version,
                 "runtime": runtime_key(version, available),
@@ -255,15 +268,18 @@ class AppState:
     def __init__(self, vendor: Path) -> None:
         self.vendor = vendor
         self.lock = threading.Lock()
-        self.folder: Path | None = None
-        self.assets: list[dict] = []
+        self.folders: dict[str, Path] = {}
+        self.assets_by_source: dict[str, list[dict]] = {}
         self.selected = ""
-        self.scanning = False
+        self.scanning: set[str] = set()
         self.error = ""
-        self.warning = ""
-        self.scan_id = 0
+        self.drop_error = ""
+        self.warnings: list[str] = []
+        self.revisions: dict[str, int] = {}
         self.last_beat = time.time()
         self.started = time.time()
+        self.window_check_at = 0.0
+        self.window_seen_at: float | None = None
         self.commands: queue.Queue = queue.Queue()
         self._select_abs = ""
 
@@ -272,55 +288,69 @@ class AppState:
 
     def snapshot(self) -> dict:
         with self.lock:
-            assets = [{k: v for k, v in item.items() if k != "abs"} for item in self.assets]
+            assets = [
+                {k: v for k, v in item.items() if k != "abs"}
+                for source in self.folders
+                for item in self.assets_by_source.get(source, [])
+            ]
+            folders = [
+                {"id": source, "path": str(path), "name": path.name or str(path)}
+                for source, path in self.folders.items()
+            ]
+            pending = [self.folders[key].name for key in self.scanning if key in self.folders]
             return {
                 "ok": True,
-                "scanning": self.scanning,
-                "folder": str(self.folder) if self.folder else "",
+                "scanning": bool(self.scanning),
+                "pending": pending,
+                "folders": folders,
                 "selected": self.selected,
                 "error": self.error,
-                "warning": self.warning,
+                "dropError": self.drop_error,
+                "warning": "\n".join(self.warnings),
                 "supported": self.supported(),
                 "assets": assets,
             }
 
-    def set_folder(self, raw: str) -> bool:
+    def normalize_folder(self, raw: str) -> Path | None:
         path = Path(raw).expanduser()
         if not path.is_absolute():
             path = Path.cwd() / path
-        select_abs = ""
         if path.is_file():
-            select_abs = str(path.resolve())
+            self._select_abs = str(path.resolve())
             path = path.parent
         try:
             path = path.resolve()
         except OSError as exc:
-            with self.lock:
-                self.error = str(exc)
-                self.scanning = False
-            return False
+            self.error = str(exc)
+            return None
         if not path.is_dir():
-            with self.lock:
-                self.error = "找不到这个文件夹"
-                self.folder = None
-                self.assets = []
-                self.scanning = False
-            return False
-        with self.lock:
-            self.scan_id += 1
-            scan_id = self.scan_id
-            self.folder = path
-            self.assets = []
-            self.selected = ""
-            self.scanning = True
-            self.error = ""
-            self.warning = ""
-            self._select_abs = select_abs
-        save_settings(path)
-        threading.Thread(target=self._scan, args=(path, scan_id), daemon=True).start()
-        return True
+            self.error = f"找不到文件夹：{path}"
+            return None
+        return path
 
-    def _scan(self, folder: Path, scan_id: int) -> None:
+    def add_folder(self, raw: str) -> bool:
+        select_abs = ""
+        if raw:
+            probe = Path(raw).expanduser()
+            if probe.is_file():
+                select_abs = str(probe.resolve())
+        path = self.normalize_folder(raw)
+        if path is None:
+            return False
+        source = source_id(path)
+        with self.lock:
+            is_new = source not in self.folders
+            self.revisions[source] = self.revisions.get(source, 0) + 1
+            revision = self.revisions[source]
+            self.folders[source] = path
+            self.scanning.add(source)
+            self.error = ""
+            self._select_abs = select_abs
+        save_settings(list(self.folders.values()))
+        threading.Thread(target=self._scan, args=(path, source, revision), daemon=True).start()
+        return is_new
+
+    def _scan(self, folder: Path, source: str, revision: int) -> None:
         try:
             assets, warning = scan_folder(folder, set(self.supported()))
             selected = ""
@@ -329,21 +359,37 @@ class AppState:
                     if item["abs"] == self._select_abs:
                         selected = item["id"]
                         break
+            error = ""
         except Exception as exc:
             log(f"scan failed: {exc}")
             assets, warning, selected = [], "", ""
             error = str(exc)
-        else:
-            error = ""
         with self.lock:
-            if scan_id != self.scan_id:
+            if source not in self.scanning or revision != self.revisions.get(source):
                 return
-            self.assets = assets
-            self.selected = selected
-            self.warning = warning
+            self.assets_by_source[source] = assets
+            if selected:
+                self.selected = selected
+            if warning:
+                self.warnings.append(warning)
             self.error = error
-            self.scanning = False
+            self.scanning.remove(source)
         log(f"scanned {folder} -> {len(assets)} skeletons")
+
+    def rescan_all(self) -> bool:
+        with self.lock:
+            folders = list(self.folders.values())
+        if not folders:
+            self.error = "还没有添加文件夹"
+            return False
+        self.warnings = []
+        for folder in folders:
+            self.add_folder(str(folder))
+        return True
+
+    def source_folder(self, source: str) -> Path | None:
+        with self.lock:
+            return self.folders.get(source)
 
 
 def content_type(path: Path) -> str:
@@ -393,10 +439,9 @@ def make_handler(state: AppState, web_root: Path, vendor_root: Path):
                 self.send_path(target, cache=True)
                 return
             if path.startswith("/assets/"):
-                if state.folder is None:
-                    self.send_error(404)
-                    return
-                target = safe_join(state.folder, path[len("/assets/") :])
+                parts = path[len("/assets/") :].split("/", 1)
+                folder = state.source_folder(parts[0]) if len(parts) == 2 else None
+                target = safe_join(folder, parts[1]) if folder and parts[1] else None
                 self.send_path(target, cache=False)
                 return
             self.send_error(404)
@@ -413,14 +458,12 @@ def make_handler(state: AppState, web_root: Path, vendor_root: Path):
                 self.send_json({"ok": True})
                 return
             if parsed.path == "/api/rescan":
-                folder = state.folder
-                if folder is None:
-                    self.send_json({"ok": False, "error": "还没有打开文件夹"})
+                if not state.rescan_all():
+                    self.send_json({"ok": False, "error": "还没有添加文件夹"})
                     return
-                state.set_folder(str(folder))
                 self.send_json({"ok": True})
                 return
-            if parsed.path == "/api/folder":
+            if parsed.path in ("/api/folder", "/api/drop"):
                 body = {}
                 if raw:
                     try:
@@ -428,22 +471,36 @@ def make_handler(state: AppState, web_root: Path, vendor_root: Path):
                     except json.JSONDecodeError:
                         self.send_json({"ok": False, "error": "请求不是 JSON"}, 400)
                         return
-                folder = str(body.get("path") or "")
-                if not folder:
+                paths = body.get("paths") if parsed.path == "/api/drop" else None
+                if paths is not None and not isinstance(paths, list):
+                    self.send_json({"ok": False, "error": "拖放路径格式错误"}, 400)
+                    return
+                if paths is None:
+                    paths = [str(body.get("path") or "")]
+                if not paths or not paths[0]:
                     box: queue.Queue = queue.Queue(1)
                     state.commands.put(("pick", box))
                     try:
-                        folder = box.get(timeout=300)
+                        paths = [box.get(timeout=300)]
                     except queue.Empty:
                         self.send_json({"ok": False, "error": "选择文件夹超时"})
                         return
-                if not folder:
+                if not paths[0]:
                     self.send_json({"ok": False, "cancelled": True})
                     return
-                if not state.set_folder(folder):
-                    self.send_json({"ok": False, "error": state.error or "无法打开文件夹"})
+                if len(paths) > 50:
+                    self.send_json({"ok": False, "error": "一次最多添加 50 个文件夹"}, 400)
                     return
-                self.send_json({"ok": True})
+                added = 0
+                for folder in paths[:50]:
+                    if not isinstance(folder, str):
+                        continue
+                    if state.add_folder(folder):
+                        added += 1
+                if state.error:
+                    self.send_json({"ok": False, "error": state.error})
+                    return
+                self.send_json({"ok": True, "added": added})
                 return
             self.send_error(404)
 
@@ -475,22 +532,54 @@ def make_handler(state: AppState, web_root: Path, vendor_root: Path):
     return Handler
 
 
+def powershell_path() -> Path:
+    return Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+
+
+def run_dialog(args: list[str], timeout: float = 300) -> subprocess.CompletedProcess:
+    """Run dialogs.ps1 with the hidden Windows PowerShell host."""
+    command = [
+        str(powershell_path()),
+        "-NoProfile",
+        "-STA",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(bundle_root() / "dialogs.ps1"),
+    ] + args
+    flags = CREATE_NO_WINDOW if os.name == "nt" else 0
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        creationflags=flags,
+    )
+
+
 def ask_folder(initial: str | None) -> str:
-    root = tk.Tk()
-    root.withdraw()
-    root.update()
+    """Native folder picker; tkinter is not shipped by every Python build."""
+    args = ["-Mode", "pick"]
+    if initial:
+        args += ["-Initial", initial]
     try:
-        root.attributes("-topmost", True)
-    except tk.TclError:
-        pass
-    kwargs = {"title": "选择包含 Spine 动画的文件夹"}
-    if initial and Path(initial).is_dir():
-        kwargs["initialdir"] = initial
+        done = run_dialog(args)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"folder picker failed: {exc}")
+        return ""
+    if done.returncode != 0:
+        log(f"folder picker exit {done.returncode}: {(done.stderr or '').strip()}")
+        return ""
+    return (done.stdout or "").strip()
+
+
+def show_error(message: str, title: str = "Spine 动画查看器") -> None:
     try:
-        picked = filedialog.askdirectory(**kwargs)
-    finally:
-        root.destroy()
-    return picked or ""
+        run_dialog(["-Mode", "error", "-Message", message, "-Title", title], timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"error dialog failed: {exc}")
 
 
 def find_browser() -> str | None:
@@ -524,8 +613,83 @@ def open_window(url: str) -> subprocess.Popen | None:
             "--disable-sync",
             "--disable-extensions",
             "--window-size=1440,900",
+            # keep the player alive while the window sits in the background:
+            # throttled or frozen timers would starve the heartbeat below.
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-features=CalculateNativeWinOcclusion",
         ]
     )
+
+
+class NativeDropHelper:
+    """Register Windows folder drops on the browser without exposing a file API."""
+
+    def __init__(self, browser: subprocess.Popen, state: AppState) -> None:
+        self.browser = browser
+        self.window_pid: int | None = None
+        self.state = state
+        self.process: subprocess.Popen | None = None
+        try:
+            powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+            flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+            self.process = subprocess.Popen(
+                [str(powershell), "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
+                 "-File", str(bundle_root() / "drop_helper.ps1"), "-ProcessId", str(browser.pid)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=flags,
+            )
+            if self.process.stdin is not None:
+                self.process.stdin.close()
+            threading.Thread(target=self._read_paths, daemon=True).start()
+            threading.Thread(target=self._read_errors, daemon=True).start()
+        except (OSError, ValueError) as exc:
+            self.state.drop_error = f"原生拖放初始化失败：{exc}"
+            log(self.state.drop_error)
+
+    def _read_paths(self) -> None:
+        try:
+            for line in self.process.stdout:
+                line = line.strip()
+                if line.startswith("READY "):
+                    try:
+                        self.window_pid = int(line.split()[1])
+                    except (ValueError, IndexError):
+                        pass
+                    continue
+                try:
+                    path = base64.b64decode(line, validate=True).decode("utf-8")
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if path and self.window_pid is not None:
+                    log(f"native drop: {path}")
+                    self.state.add_folder(path)
+            if self.window_pid is None:
+                self.state.drop_error = "拖放组件初始化失败，请使用「添加文件夹」或重启程序。"
+                log(self.state.drop_error)
+        except (OSError, ValueError) as exc:
+            log(f"drop helper stdout failed: {exc}")
+
+    def _read_errors(self) -> None:
+        try:
+            for line in self.process.stderr:
+                if line.strip():
+                    log(f"drop helper: {line.strip()}")
+        except (OSError, ValueError):
+            pass
+
+    def close(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            try:
+                self.process.terminate()
+            except OSError:
+                pass
 
 
 def parse_cli(argv: list[str]) -> tuple[bool, int, str | None, str | None]:
@@ -558,14 +722,55 @@ def pump(state: AppState) -> None:
     except queue.Empty:
         return
     if cmd[0] == "pick":
-        initial = str(state.folder) if state.folder else ""
+        initial = str(next(reversed(state.folders.values()))) if state.folders else ""
         cmd[1].put(ask_folder(initial or None))
 
 
-def heartbeat_dead(state: AppState) -> bool:
-    if time.time() - state.started < 20:
+def spine_window_open() -> bool:
+    """True while a Chrome/Edge app window titled like ours exists.
+
+    This is the only honest "is the window still there?" signal: heartbeats
+    stall whenever Windows sends the window to the background, and the
+    launcher process can exit immediately while Edge hands the URL over.
+    Minimised windows keep their WS_VISIBLE style, so they still count.
+    """
+    if os.name != "nt":
+        return True
+    user32 = ctypes.windll.user32
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _param):
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length:
+            title = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, title, length + 1)
+            if title.value == WINDOW_TITLE:
+                klass = ctypes.create_unicode_buffer(128)
+                user32.GetClassNameW(hwnd, klass, 128)
+                if klass.value.startswith("Chrome_WidgetWin_"):
+                    found.append(hwnd)
+                    return False
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return bool(found)
+
+
+def should_stop(no_browser: bool, proc: subprocess.Popen | None, state: AppState) -> bool:
+    """Wait for the window to show up once, then exit shortly after it is gone."""
+    if no_browser:
         return False
-    return time.time() - state.last_beat > 8
+    now = time.time()
+    if now - state.window_check_at < 1.0:
+        return False
+    state.window_check_at = now
+    if spine_window_open():
+        state.window_seen_at = now
+        return False
+    if state.window_seen_at is None:
+        return False  # page never announced itself yet; keep waiting
+    return now - state.window_seen_at > 6
 
 
 def main() -> None:
@@ -587,19 +792,20 @@ def main() -> None:
         print(json.dumps({"count": len(summary), "warning": warning, "assets": summary}, ensure_ascii=False, indent=2))
         return
     if not web_root.is_dir() or not any(available_runtimes(vendor)):
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror("Spine 动画查看器", "播放器文件不完整，请先运行 fetch_runtimes.py。")
-        root.destroy()
+        show_error("播放器文件不完整，请先运行 fetch_runtimes.py。")
         return
 
     state = AppState(vendor)
     if folder_arg:
-        state.set_folder(folder_arg)
+        state.add_folder(folder_arg)
     else:
-        last = str(load_settings().get("folder") or "")
-        if last and Path(last).is_dir():
-            state.set_folder(last)
+        settings = load_settings()
+        saved = settings.get("folders")
+        if not isinstance(saved, list):
+            saved = [str(settings.get("folder") or "")]
+        for saved_folder in saved:
+            if saved_folder and Path(saved_folder).is_dir():
+                state.add_folder(str(saved_folder))
 
     handler = make_handler(state, web_root, vendor)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
@@ -611,18 +817,17 @@ def main() -> None:
     (Path(tempfile.gettempdir()) / "spine-py-viewer.port").write_text(str(bound), encoding="utf-8")
     log("listening " + url)
     proc = None if no_browser else open_window(url)
+    drop_helper = NativeDropHelper(proc, state) if proc is not None else None
     try:
         while True:
             pump(state)
-            if no_browser:
-                continue
-            if proc is not None and proc.poll() is not None and heartbeat_dead(state):
-                break
-            if proc is None and heartbeat_dead(state):
+            if should_stop(no_browser, proc, state):
                 break
     except KeyboardInterrupt:
         pass
     finally:
+        if drop_helper is not None:
+            drop_helper.close()
         server.shutdown()
         server.server_close()
 

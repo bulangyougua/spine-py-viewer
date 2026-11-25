@@ -2,7 +2,7 @@
   const openBtn = document.getElementById("open");
   const refreshBtn = document.getElementById("refresh");
   const filterInput = document.getElementById("filter");
-  const folderLabel = document.getElementById("folder");
+  const folderLabel = document.getElementById("folders");
   const countLabel = document.getElementById("count");
   const list = document.getElementById("list");
   const pauseBtn = document.getElementById("pause");
@@ -19,7 +19,7 @@
   const zoomInBtn = document.getElementById("zoomIn");
   const viewHint = document.getElementById("viewHint");
 
-  let payload = { assets: [], folder: "", scanning: false, supported: [] };
+  let payload = { assets: [], folders: [], scanning: false, supported: [] };
   let current = null;
   let token = 0;
   let frameRuntime = "";
@@ -29,6 +29,8 @@
   let pendingFail = null;
   const pmaOverride = new Map();
   let pollTimer = 0;
+  let librarySignature = "";
+  let folderSignature = "";
 
   function showOverlay(text) {
     overlay.textContent = text;
@@ -62,34 +64,51 @@
   function renderList() {
     const query = filterInput.value.trim().toLowerCase();
     const assets = payload.assets || [];
+    const folders = payload.folders || [];
+    const folderNames = new Map(folders.map(function (folder) { return [folder.id, folder.name]; }));
+    const signature = JSON.stringify([query, folders, assets, payload.scanning, payload.pending,
+      payload.error, payload.warning, current ? current.id : ""]);
+    if (signature === librarySignature) return;
+    const scrollTop = list.scrollTop;
+    librarySignature = signature;
     const shown = assets.filter(function (asset) {
       if (!query) return true;
-      return (asset.rel + " " + asset.kind + " " + asset.version).toLowerCase().indexOf(query) >= 0;
+      const source = folderNames.get(asset.source) || "";
+      return (source + " " + asset.rel + " " + asset.kind + " " + asset.version).toLowerCase().indexOf(query) >= 0;
     });
     countLabel.textContent = payload.scanning
-      ? "正在扫描…"
-      : (shown.length + " / " + assets.length + " 个文件");
+      ? shown.length + " 个资源 · 正在扫描 " + (payload.pending || []).join("、") + "…"
+      : (folders.length + " 个文件夹 · " + shown.length + " / " + assets.length + " 个资源");
     list.replaceChildren();
-    if (!payload.folder) return;
-    if (payload.scanning) {
+    if (!folders.length) return;
+    if (payload.scanning && !assets.length) {
       const note = document.createElement("div");
       note.className = "empty";
       note.textContent = "正在查找 .skel 和 .json…";
       list.appendChild(note);
-      return;
     }
-    if (!assets.length) {
+    if (!payload.scanning && !assets.length) {
       const note = document.createElement("div");
       note.className = "empty";
-      note.textContent = payload.error || payload.warning || "没有找到 Spine 文件。需要 .skel 或 .json，以及同目录的 .atlas。";
+      note.textContent = payload.error || "没有找到 Spine 文件。需要 .skel 或 .json，以及同目录的 .atlas。";
       list.appendChild(note);
       return;
     }
+    let previousSource = "";
     shown.forEach(function (asset) {
+      if (asset.source !== previousSource) {
+        const heading = document.createElement("div");
+        const folder = folders.find(function (item) { return item.id === asset.source; });
+        heading.className = "source";
+        heading.textContent = folderNames.get(asset.source) || "已添加文件夹";
+        heading.title = folder ? folder.path : "";
+        list.appendChild(heading);
+        previousSource = asset.source;
+      }
       const button = document.createElement("button");
       button.type = "button";
       button.className = "file" + (current && current.id === asset.id ? " on" : "");
-      button.title = asset.rel;
+      button.title = (folderNames.get(asset.source) || "") + " / " + asset.rel;
       const name = document.createElement("span");
       name.className = "file-name";
       name.textContent = asset.name;
@@ -103,11 +122,27 @@
       button.addEventListener("click", function () { selectAsset(asset); });
       list.appendChild(button);
     });
-    if (payload.warning) {
+    if (!payload.scanning && query && !shown.length) {
+      const note = document.createElement("div");
+      note.className = "empty";
+      note.textContent = "没有匹配的资源。";
+      list.appendChild(note);
+    }
+    if (payload.warning && !payload.scanning) {
       const note = document.createElement("div");
       note.className = "empty";
       note.textContent = payload.warning;
       list.appendChild(note);
+    }
+    if (current) {
+      const selected = list.querySelector(".file.on");
+      if (selected && selected.getBoundingClientRect().bottom > list.getBoundingClientRect().bottom) {
+        selected.scrollIntoView({ block: "nearest" });
+      } else {
+        list.scrollTop = scrollTop;
+      }
+    } else {
+      list.scrollTop = scrollTop;
     }
   }
 
@@ -216,46 +251,118 @@
     });
   }
 
+  let refreshBusy = false;
+  let failures = 0;
+
+  // A hanging socket must never wedge the poll loop, so every request gets
+  // its own deadline instead of waiting on the browser's default timeout.
+  async function getJson(url, options) {
+    const controller = new AbortController();
+    const timer = setTimeout(function () { controller.abort(); }, 6000);
+    try {
+      const response = await fetch(url, Object.assign({
+        signal: controller.signal,
+        cache: "no-store",
+      }, options || {}));
+      return await response.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function refresh() {
-    const data = await (await fetch("/api/assets")).json();
-    payload = data;
-    folderLabel.textContent = data.folder || "尚未选择文件夹";
-    renderList();
-    if (pollTimer) clearTimeout(pollTimer);
-    if (data.scanning) {
-      pollTimer = setTimeout(refresh, 400);
-      return;
+    if (refreshBusy) return;
+    refreshBusy = true;
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = 0;
     }
-    if (!data.folder) {
-      showOverlay("打开一个文件夹，或把文件夹拖到 SpineViewer.exe 上。\n文件夹里可以同时放 .skel 和 .json，每个动画再配上同名 .atlas 和图片。");
-      return;
-    }
-    if (data.selected) {
-      const selected = (data.assets || []).find(function (asset) { return asset.id === data.selected; });
-      if (selected && (!current || current.id !== selected.id)) selectAsset(selected);
+    try {
+      const data = await getJson("/api/assets");
+      failures = 0;
+      payload = data;
+      const folders = data.folders || [];
+      const nextFolderSignature = JSON.stringify(folders);
+      if (nextFolderSignature !== folderSignature) {
+        folderSignature = nextFolderSignature;
+        folderLabel.replaceChildren();
+        if (!folders.length) {
+          folderLabel.textContent = "尚未添加文件夹";
+        } else {
+          folders.forEach(function (folder) {
+            const item = document.createElement("div");
+            item.className = "folder";
+            item.textContent = folder.name;
+            item.title = folder.path;
+            folderLabel.appendChild(item);
+          });
+        }
+      }
+      if (data.dropError) countLabel.textContent = data.dropError;
+      renderList();
+      pollTimer = setTimeout(refresh, data.scanning ? 400 : 1200);
+      if (data.scanning) return;
+      if (!folders.length) {
+        showOverlay("把文件夹拖到左侧区域，或点击「添加文件夹」。\n可分多次添加不同文件夹，所有 Spine 动画都会保留在同一个列表中。");
+        return;
+      }
+      if (data.selected) {
+        const selected = (data.assets || []).find(function (asset) { return asset.id === data.selected; });
+        if (selected && (!current || current.id !== selected.id)) selectAsset(selected);
+      }
+    } catch (err) {
+      // keep polling: a dead window that never retries stays stuck on "加载中"
+      failures += 1;
+      countLabel.textContent = failures > 3
+        ? "连接查看器失败，请重启程序。"
+        : "正在重新连接查看器…";
+      pollTimer = setTimeout(refresh, failures > 3 ? 5000 : 1000);
+    } finally {
+      refreshBusy = false;
     }
   }
 
   openBtn.addEventListener("click", async function () {
     openBtn.disabled = true;
     try {
-      await fetch("/api/folder", {
+      await getJson("/api/folder", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "{}",
       });
       await refresh();
+    } catch (err) {
+      countLabel.textContent = "添加文件夹失败，请重试。";
     } finally {
       openBtn.disabled = false;
     }
   });
 
+  // Windows folder paths arrive through the local native drop helper.
+  ["dragenter", "dragover"].forEach(function (name) {
+    document.addEventListener(name, function (event) {
+      event.preventDefault();
+      document.body.classList.add("drag-over");
+    });
+  });
+  document.addEventListener("dragleave", function (event) {
+    if (!event.relatedTarget) document.body.classList.remove("drag-over");
+  });
+  document.addEventListener("drop", function (event) {
+    event.preventDefault();
+    document.body.classList.remove("drag-over");
+    // Chromium keeps directory paths private; /api/drop handles native paths.
+  });
+
   refreshBtn.addEventListener("click", async function () {
-    await fetch("/api/rescan", { method: "POST" });
-    current = null;
-    setPlaying(false);
-    anims.replaceChildren();
-    showOverlay("正在重新扫描…");
+    try {
+      const response = await getJson("/api/rescan", { method: "POST" });
+      if (!response.ok) return;
+    } catch (err) {
+      countLabel.textContent = "刷新失败，请重试。";
+      return;
+    }
+    showOverlay("正在重新扫描全部文件夹…");
     await refresh();
   });
 
@@ -326,6 +433,21 @@
     }
   });
 
-  setInterval(function () { fetch("/api/heartbeat"); }, 1000);
+  function beat() {
+    fetch("/api/heartbeat", { cache: "no-store" }).catch(function () {});
+  }
+
+  // Coming back from the background: ping right away and repaint the list,
+  // because pending timers may have been frozen while the window was hidden.
+  function wake() {
+    if (document.hidden) return;
+    beat();
+    if (!refreshBusy) refresh();
+  }
+
+  setInterval(beat, 1000);
+  document.addEventListener("visibilitychange", wake);
+  window.addEventListener("focus", wake);
+  window.addEventListener("pageshow", wake);
   refresh();
 })();

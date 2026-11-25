@@ -43,14 +43,60 @@ aside {
 #refresh { width: 64px; cursor: pointer; }
 #filter { margin: 0 12px 8px; padding: 0 10px; }
 
-.folder, .count, .foot {
+.drop-hint {
+  margin: 0 12px 10px;
+  padding: 10px;
+  border: 1px dashed #53647c;
+  border-radius: 5px;
+  color: #b1c1d8;
+  font-size: 12px;
+  line-height: 1.7;
+  text-align: center;
+  background: rgba(47, 95, 147, 0.12);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.drag-over .drop-hint {
+  border-color: #a6ceff;
+  background: rgba(67, 133, 198, 0.45);
+  color: #fff;
+}
+
+.folders { max-height: 92px; overflow-y: auto; }
+.folder {
+  padding: 2px 12px;
+  color: #9aa3b2;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folder::before { content: "▸ "; color: #738aa8; }
+.count, .foot {
   padding: 0 12px 8px;
   color: #9aa3b2;
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+.count { padding-top: 6px; }
 
 .list { flex: 1; overflow: auto; }
+.source {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 7px 12px 5px;
+  background: #222b39;
+  border-top: 1px solid #35445b;
+  border-bottom: 1px solid #35445b;
+  color: #b9d5f5;
+  font-size: 12px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .file {
   display: block;
